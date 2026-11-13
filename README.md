@@ -6,8 +6,8 @@ does not depend on the `Learn-AI` GitHub repository at runtime.
 
 ## Input format
 
-The web accepts CSV files with up to 10,000 rows and 1,000 columns. A header row is
-optional. It shows a data preview and per-column statistics (numeric type, missing
+The web accepts CSV files up to 4 MB, 10,000 rows, and 1,000 columns. A header row
+is optional. It shows a data preview and per-column statistics (numeric type, missing
 values, unique values, min/max/mean or common text values).
 
 Only a CSV with exactly 561 numeric UCI HAR features in the original feature order
@@ -32,11 +32,26 @@ Open `http://127.0.0.1:8000`. The API documentation is at
 Run the tests with:
 
 ```bash
+python -m pip install -r requirements-dev.txt
 python -m unittest discover -s tests -v
 ```
 
 The saved model was created with scikit-learn 1.6.1; the requirements pin that
 version so predictions are consistent with the Colab model.
+
+## Deploy to Vercel
+
+The Vercel Python entrypoint is explicitly set to `web_app:app` in `pyproject.toml`,
+so Vercel does not mistake the test module for the production FastAPI app.
+
+1. Push this project to the `WEB-AI-COLAB` GitHub repository.
+2. In Vercel, import that repository and set the project Root Directory to `.` (the
+   repository root containing `pyproject.toml`, `web_app.py`, `index.html`, and
+   `outputs/mlp_har.joblib`).
+3. Use the Python/FastAPI framework preset or let Vercel detect it, then deploy.
+
+To stay within Vercel's request-body limit, uploads are capped at 4 MB. The generated
+deployment URL is available in the Vercel project dashboard after a successful deployment.
 
 ## Run in Google Colab
 
