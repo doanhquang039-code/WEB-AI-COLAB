@@ -19,6 +19,19 @@ produce model predictions when they have 561 columns, but those predictions are
 not meaningful HAR results. Raw accelerometer/gyroscope readings must first be
 converted to the 561 UCI HAR features.
 
+To evaluate the models, include those 561 feature columns and one `activity` column
+with the actual activity name (for example `WALKING`) or UCI class ID (1–6). The app
+reports accuracy, Macro-F1, precision/recall/F1 per class, and confusion matrices
+for both MLP and Logistic Regression. Without true labels it compares predictions
+and class distributions only; it does not report accuracy.
+
+The “Tải CSV HAR mẫu có nhãn thật” link downloads a balanced 180-row sample selected
+from the UCI HAR test split (30 rows per activity), with features and ground-truth
+labels. It is for demonstrating evaluation, not a replacement for the complete
+held-out test set. Dataset citation and license: Anguita et al., *A Public Domain
+Dataset for Human Activity Recognition using Smartphones*, ESANN 2013; UCI HAR,
+DOI 10.24432/C54S4K, CC BY 4.0.
+
 ## Run locally
 
 From this folder:

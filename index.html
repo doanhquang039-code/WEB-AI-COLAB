@@ -133,6 +133,24 @@
 
     .analysis-block { margin-top: 22px; }
     .analysis-block h3 { margin: 0 0 10px; font-size: 16px; }
+    .sample-link {
+      color: #4658d8;
+      font-size: 14px;
+      font-weight: 700;
+      text-decoration: none;
+    }
+
+    .sample-link:hover { text-decoration: underline; }
+    .chart-wrap { width: 100%; overflow-x: auto; }
+    .chart {
+      display: block;
+      width: 100%;
+      min-width: 620px;
+      height: 300px;
+    }
+
+    .compact-table { max-height: 500px; }
+    .confusion-cell { min-width: 54px; text-align: center; }
     .insights {
       display: grid;
       gap: 8px;
@@ -220,7 +238,8 @@
     <h1>Tải lên và phân tích dữ liệu CSV</h1>
     <p class="intro">
       Xem trước dữ liệu, thống kê từng cột và kiểm tra dữ liệu thiếu. CSV có đúng
-      561 đặc trưng HAR dạng số còn được mô hình MLP dự đoán hoạt động.
+      561 đặc trưng HAR có thể được dự đoán; thêm nhãn <code>activity</code> để
+      đánh giá và so sánh hai mô hình.
     </p>
 
     <section class="card" aria-label="Tải dữ liệu và kết quả">
@@ -230,8 +249,10 @@
           <p class="upload-help">
             Hỗ trợ CSV có số cột tùy ý, có hoặc không có dòng tiêu đề.
             Tối đa 4 MB, 10.000 dòng và 1.000 cột mỗi tệp.
+            Đánh giá HAR cần 561 cột đặc trưng và một cột <code>activity</code>.
           </p>
           <input id="csv-file" name="file" type="file" accept=".csv,text/csv" required>
+          <a class="sample-link" href="/api/sample">Tải CSV HAR mẫu có nhãn thật (180 dòng)</a>
           <button id="submit-button" type="submit">Đọc và phân tích CSV</button>
         </div>
       </form>
@@ -241,7 +262,7 @@
       <section id="results" class="results" aria-labelledby="results-title" hidden>
         <div class="results-head">
           <h2 id="results-title">Tổng quan dữ liệu</h2>
-          <button id="download-button" class="download" type="button" hidden>Tải CSV dự đoán</button>
+          <button id="download-button" class="download" type="button" hidden>Tải CSV so sánh</button>
         </div>
         <div id="summary" class="summary"></div>
         <p id="analysis-message" class="notice"></p>
@@ -268,6 +289,11 @@
             </table>
           </div>
         </div>
+        <div id="histogram-block" class="analysis-block">
+          <h3>Phân bố một số đặc trưng</h3>
+          <p class="note">Tự chọn tối đa ba cột số có độ phân tán cao nhất; biểu đồ chỉ mô tả dữ liệu đầu vào.</p>
+          <div id="histogram-charts"></div>
+        </div>
         <div id="predictions-block" class="analysis-block" hidden>
           <div class="results-head">
             <h3>Kết quả dự đoán HAR</h3>
@@ -279,6 +305,40 @@
             </table>
           </div>
         </div>
+        <section id="har-results" class="analysis-block" hidden>
+          <h2>Đánh giá và so sánh mô hình HAR</h2>
+          <p id="har-message" class="note"></p>
+          <div id="har-summary" class="summary"></div>
+          <div class="analysis-block">
+            <h3 id="class-chart-title">Phân bố hoạt động</h3>
+            <div class="chart-wrap"><canvas id="class-chart" class="chart" height="300"></canvas></div>
+          </div>
+          <div id="evaluation-block" class="analysis-block" hidden>
+            <div class="results-head">
+              <h3>Ma trận nhầm lẫn</h3>
+              <select id="evaluation-model" aria-label="Chọn mô hình cần xem">
+                <option value="mlp">MLP</option>
+                <option value="lr">Logistic Regression</option>
+              </select>
+            </div>
+            <p class="note">Hàng là nhãn thật, cột là nhãn mô hình dự đoán; số trên đường chéo là dự đoán đúng.</p>
+            <div class="table-wrap compact-table">
+              <table>
+                <thead id="confusion-head"></thead>
+                <tbody id="confusion-body"></tbody>
+              </table>
+            </div>
+            <div class="analysis-block">
+              <h3>Chỉ số theo từng hoạt động</h3>
+              <div class="table-wrap">
+                <table>
+                  <thead id="class-metrics-head"></thead>
+                  <tbody id="class-metrics-body"></tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </section>
         <p id="table-caption" class="note"></p>
       </section>
 
@@ -308,12 +368,225 @@
     const predictionsBlock = document.querySelector("#predictions-block");
     const predictionsHead = document.querySelector("#predictions-head");
     const predictionsBody = document.querySelector("#predictions-body");
+    const harResults = document.querySelector("#har-results");
+    const harMessage = document.querySelector("#har-message");
+    const harSummary = document.querySelector("#har-summary");
+    const classChart = document.querySelector("#class-chart");
+    const classChartTitle = document.querySelector("#class-chart-title");
+    const evaluationBlock = document.querySelector("#evaluation-block");
+    const evaluationModel = document.querySelector("#evaluation-model");
+    const confusionHead = document.querySelector("#confusion-head");
+    const confusionBody = document.querySelector("#confusion-body");
+    const classMetricsHead = document.querySelector("#class-metrics-head");
+    const classMetricsBody = document.querySelector("#class-metrics-body");
+    const histogramCharts = document.querySelector("#histogram-charts");
     let latestResults = null;
 
     function addCell(row, value, isHeader = false) {
       const cell = document.createElement(isHeader ? "th" : "td");
       cell.textContent = value;
       row.appendChild(cell);
+    }
+
+    function renderBarChart(canvas, series, labels) {
+      const context = canvas.getContext("2d");
+      const ratio = window.devicePixelRatio || 1;
+      const width = Math.max(canvas.clientWidth, 620);
+      const height = 300;
+      canvas.width = width * ratio;
+      canvas.height = height * ratio;
+      context.scale(ratio, ratio);
+      context.clearRect(0, 0, width, height);
+
+      const padding = { top: 20, right: 20, bottom: 76, left: 48 };
+      const plotWidth = width - padding.left - padding.right;
+      const plotHeight = height - padding.top - padding.bottom;
+      const maxValue = Math.max(1, ...series.flatMap((item) => item.values));
+      context.font = "11px Segoe UI, sans-serif";
+      context.textAlign = "right";
+      context.fillStyle = "#667085";
+      context.strokeStyle = "#e8ebf2";
+
+      for (let tick = 0; tick <= 4; tick += 1) {
+        const value = Math.round(maxValue * tick / 4);
+        const y = padding.top + plotHeight - plotHeight * tick / 4;
+        context.beginPath();
+        context.moveTo(padding.left, y);
+        context.lineTo(width - padding.right, y);
+        context.stroke();
+        context.fillText(String(value), padding.left - 8, y + 4);
+      }
+
+      const groupWidth = plotWidth / labels.length;
+      const barWidth = Math.min(42, groupWidth / (series.length + 1));
+      labels.forEach((label, labelIndex) => {
+        const groupStart = padding.left + labelIndex * groupWidth;
+        series.forEach((item, seriesIndex) => {
+          const value = item.values[labelIndex] || 0;
+          const barHeight = plotHeight * value / maxValue;
+          const x = groupStart + groupWidth / 2
+            + (seriesIndex - (series.length - 1) / 2) * (barWidth + 3)
+            - barWidth / 2;
+          const y = padding.top + plotHeight - barHeight;
+          context.fillStyle = item.color;
+          context.fillRect(x, y, barWidth, barHeight);
+        });
+        context.save();
+        context.translate(groupStart + groupWidth / 2, padding.top + plotHeight + 12);
+        context.rotate(-Math.PI / 5);
+        context.textAlign = "right";
+        context.fillStyle = "#586278";
+        context.fillText(label.length > 22 ? `${label.slice(0, 20)}…` : label, 0, 0);
+        context.restore();
+      });
+
+      if (series.length > 1) {
+        series.forEach((item, index) => {
+          const x = padding.left + index * 190;
+          context.fillStyle = item.color;
+          context.fillRect(x, height - 19, 12, 12);
+          context.fillStyle = "#46516a";
+          context.textAlign = "left";
+          context.fillText(item.name, x + 17, height - 9);
+        });
+      }
+    }
+
+    function renderConfusionMatrix(modelName) {
+      const metrics = latestResults?.model_metrics?.[modelName];
+      if (!metrics) return;
+      const labels = latestResults.class_names;
+      confusionHead.replaceChildren();
+      const headerRow = document.createElement("tr");
+      addCell(headerRow, "Thật \\ Dự đoán", true);
+      labels.forEach((label) => addCell(headerRow, label, true));
+      confusionHead.appendChild(headerRow);
+
+      confusionBody.replaceChildren();
+      metrics.confusion_matrix.forEach((values, rowIndex) => {
+        const row = document.createElement("tr");
+        addCell(row, labels[rowIndex], true);
+        const rowMax = Math.max(1, ...values);
+        values.forEach((value, columnIndex) => {
+          const cell = document.createElement("td");
+          cell.className = "confusion-cell";
+          cell.textContent = String(value);
+          cell.style.backgroundColor = `rgba(70, 88, 216, ${0.06 + 0.58 * value / rowMax})`;
+          cell.title = `${labels[rowIndex]} → ${labels[columnIndex]}: ${value}`;
+          row.appendChild(cell);
+        });
+        confusionBody.appendChild(row);
+      });
+
+      classMetricsHead.replaceChildren();
+      const metricsHeader = document.createElement("tr");
+      ["Hoạt động", "Precision", "Recall", "F1-score", "Số mẫu thật"].forEach(
+        (heading) => addCell(metricsHeader, heading, true),
+      );
+      classMetricsHead.appendChild(metricsHeader);
+      classMetricsBody.replaceChildren();
+      metrics.per_class.forEach((item) => {
+        const row = document.createElement("tr");
+        [
+          item.label,
+          `${(item.precision * 100).toFixed(2)}%`,
+          `${(item.recall * 100).toFixed(2)}%`,
+          `${(item.f1 * 100).toFixed(2)}%`,
+          String(item.support),
+        ].forEach((value) => addCell(row, value));
+        classMetricsBody.appendChild(row);
+      });
+    }
+
+    function renderHistograms(data) {
+      histogramCharts.replaceChildren();
+      data.histograms.forEach((histogram) => {
+        const heading = document.createElement("h4");
+        heading.textContent = histogram.name;
+        const canvas = document.createElement("canvas");
+        canvas.className = "chart";
+        canvas.height = 300;
+        histogramCharts.append(heading, canvas);
+        renderBarChart(canvas, [{
+          name: histogram.name,
+          color: "#7281e8",
+          values: histogram.bins.map((bin) => bin.count),
+        }], histogram.bins.map((bin) => bin.range));
+      });
+    }
+
+    function renderHarAnalysis(data) {
+      const hasHarOutput = data.mode === "prediction" || data.mode === "evaluation";
+      harResults.hidden = !hasHarOutput;
+      predictionsBlock.hidden = !hasHarOutput;
+      if (!hasHarOutput) return;
+
+      const isEvaluation = data.mode === "evaluation";
+      harMessage.textContent = isEvaluation
+        ? `${data.message} Chỉ số được tính trên ${data.rows.toLocaleString("vi-VN")} dòng có nhãn trong tệp này.`
+        : `${data.message} Chưa có nhãn thật nên không thể tính accuracy/F1.`;
+      harSummary.replaceChildren();
+      const summaryItems = [
+        `Hai mô hình đồng ý: ${(data.model_agreement * 100).toFixed(2)}%`,
+      ];
+      if (isEvaluation) {
+        ["mlp", "lr"].forEach((name) => {
+          const metrics = data.model_metrics[name];
+          const label = name === "mlp" ? "MLP" : "Logistic Regression";
+          summaryItems.push(`${label} accuracy: ${(metrics.accuracy * 100).toFixed(2)}%`);
+          summaryItems.push(`${label} Macro-F1: ${(metrics.macro_f1 * 100).toFixed(2)}%`);
+        });
+      }
+      summaryItems.forEach((text) => {
+        const pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = text;
+        harSummary.appendChild(pill);
+      });
+
+      if (isEvaluation) {
+        classChartTitle.textContent = "Phân bố nhãn hoạt động thật";
+        renderBarChart(classChart, [{
+          name: "Nhãn thật",
+          color: "#4658d8",
+          values: data.class_distribution.map((item) => item.count),
+        }], data.class_distribution.map((item) => item.label));
+        evaluationBlock.hidden = false;
+        renderConfusionMatrix(evaluationModel.value);
+      } else {
+        classChartTitle.textContent = "Phân bố nhãn dự đoán theo mô hình";
+        renderBarChart(classChart, [
+          {
+            name: "MLP",
+            color: "#4658d8",
+            values: data.predicted_distributions.mlp.map((item) => item.count),
+          },
+          {
+            name: "Logistic Regression",
+            color: "#22a06b",
+            values: data.predicted_distributions.lr.map((item) => item.count),
+          },
+        ], data.class_names);
+        evaluationBlock.hidden = true;
+      }
+
+      predictionsBlock.hidden = false;
+      predictionsHead.replaceChildren();
+      const predictionHeader = document.createElement("tr");
+      ["Dòng", ...(isEvaluation ? ["Nhãn thật"] : []), "MLP", "Tin cậy MLP", "Logistic Regression", "Tin cậy LR"]
+        .forEach((heading) => addCell(predictionHeader, heading, true));
+      predictionsHead.appendChild(predictionHeader);
+      predictionsBody.replaceChildren();
+      data.predictions.slice(0, 100).forEach((item) => {
+        const row = document.createElement("tr");
+        addCell(row, String(item.row));
+        if (isEvaluation) addCell(row, item.actual);
+        addCell(row, item.mlp);
+        addCell(row, `${(item.mlp_confidence * 100).toFixed(2)}%`);
+        addCell(row, item.logistic_regression);
+        addCell(row, `${(item.lr_confidence * 100).toFixed(2)}%`);
+        predictionsBody.appendChild(row);
+      });
     }
 
     function showResults(data) {
@@ -327,7 +600,9 @@
         `Ô thiếu: ${data.summary.missing_cells.toLocaleString("vi-VN")} (${data.summary.missing_percent}%)`,
         `Ô chữ/không phải số: ${data.summary.non_numeric_cells.toLocaleString("vi-VN")}`,
         `Dòng trùng: ${data.summary.duplicate_rows}`,
-        data.mode === "prediction" ? `Mô hình: ${data.model}` : "Chế độ: phân tích CSV",
+        data.mode === "evaluation" ? "Chế độ: đánh giá có nhãn"
+          : data.mode === "prediction" ? "Chế độ: dự đoán HAR"
+            : "Chế độ: phân tích CSV",
       ].forEach((text) => {
         const pill = document.createElement("span");
         pill.className = "pill";
@@ -342,7 +617,7 @@
         item.textContent = insight;
         insightsElement.appendChild(item);
       });
-      downloadButton.hidden = data.mode !== "prediction";
+      downloadButton.hidden = !data.predictions || data.predictions.length === 0;
 
       const statHeadings = [
         "Cột", "Kiểu", "Thiếu", "Khác nhau", "Nhỏ nhất", "Q1", "Trung vị",
@@ -360,7 +635,9 @@
           .join(", ");
         [
           stat.name,
-          stat.type === "numeric" ? "Số" : stat.type === "mixed" ? "Hỗn hợp" : "Văn bản",
+          stat.type === "numeric" ? "Số"
+            : stat.type === "mixed" ? "Hỗn hợp"
+              : stat.type === "empty" ? "Trống" : "Văn bản",
           String(stat.missing),
           String(stat.unique),
           stat.min === undefined ? "—" : String(stat.min),
@@ -393,28 +670,16 @@
         ? `Bản xem trước giới hạn ${data.preview_rows} dòng và ${data.preview_columns} cột.`
         : "Đã hiển thị toàn bộ dữ liệu.";
 
-      predictionsBlock.hidden = data.mode !== "prediction";
-      if (data.mode === "prediction") {
-        const labels = Object.keys(data.results[0].probabilities);
-        const predictionHeadings = ["Dòng", "Dự đoán", "Độ tin cậy"];
-        predictionsHead.replaceChildren();
-        const predictionHeadingRow = document.createElement("tr");
-        predictionHeadings.forEach((heading) => addCell(predictionHeadingRow, heading, true));
-        predictionsHead.appendChild(predictionHeadingRow);
-        predictionsBody.replaceChildren();
-        data.results.slice(0, 100).forEach((item) => {
-          const row = document.createElement("tr");
-          addCell(row, String(item.row));
-          addCell(row, item.prediction);
-          addCell(row, `${(item.confidence * 100).toFixed(2)}%`);
-          predictionsBody.appendChild(row);
-        });
-        tableCaption.textContent = data.rows > 100
-          ? `${tableCaption.textContent} Kết quả dự đoán hiển thị tối đa 100 dòng; tải CSV để lấy toàn bộ.`
-          : tableCaption.textContent;
-      }
+      renderHarAnalysis(data);
+      tableCaption.textContent = data.rows > 100
+        ? `${tableCaption.textContent} Kết quả dự đoán hiển thị tối đa 100 dòng; tải CSV để lấy toàn bộ.`
+        : tableCaption.textContent;
 
       resultsElement.hidden = false;
+      renderHistograms(data);
+      requestAnimationFrame(() => {
+        if (data.mode === "evaluation" || data.mode === "prediction") renderHarAnalysis(data);
+      });
     }
 
     form.addEventListener("submit", async (event) => {
@@ -434,9 +699,11 @@
         const data = await response.json();
         if (!response.ok) throw new Error(data.detail || "Không thể xử lý tệp.");
         showResults(data);
-        statusElement.textContent = data.mode === "prediction"
-          ? "Phân tích và dự đoán hoàn tất."
-          : "Phân tích CSV hoàn tất.";
+        statusElement.textContent = data.mode === "evaluation"
+          ? "Đánh giá và so sánh mô hình hoàn tất."
+          : data.mode === "prediction"
+            ? "Phân tích và so sánh dự đoán hoàn tất."
+            : "Phân tích CSV hoàn tất.";
       } catch (error) {
         statusElement.classList.add("error");
         statusElement.textContent = error.message || "Không kết nối được API.";
@@ -445,25 +712,35 @@
       }
     });
 
+    evaluationModel.addEventListener("change", () => {
+      if (latestResults?.mode === "evaluation") {
+        renderConfusionMatrix(evaluationModel.value);
+      }
+    });
+
     downloadButton.addEventListener("click", () => {
-      if (!latestResults || latestResults.mode !== "prediction" || !latestResults.results.length) return;
-      const labels = Object.keys(latestResults.results[0].probabilities);
-      const headers = ["row", "prediction", "confidence", ...labels.map((label) => `prob_${label}`)];
+      if (!latestResults?.predictions?.length) return;
+      const headers = [
+        "row", "actual", "mlp_prediction", "mlp_confidence",
+        "logistic_regression_prediction", "lr_confidence",
+      ];
       const escapeCsv = (value) => `"${String(value).replaceAll('"', '""')}"`;
       const lines = [
         headers.map(escapeCsv).join(","),
-        ...latestResults.results.map((item) => [
+        ...latestResults.predictions.map((item) => [
           item.row,
-          item.prediction,
-          item.confidence,
-          ...labels.map((label) => item.probabilities[label]),
+          item.actual || "",
+          item.mlp,
+          item.mlp_confidence,
+          item.logistic_regression,
+          item.lr_confidence,
         ].map(escapeCsv).join(",")),
       ];
       const blob = new Blob(["\uFEFF", lines.join("\r\n")], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
-      link.download = "har_predictions.csv";
+      link.download = "har_model_comparison.csv";
       link.click();
       URL.revokeObjectURL(url);
     });

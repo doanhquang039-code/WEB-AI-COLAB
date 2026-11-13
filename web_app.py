@@ -9,19 +9,30 @@ import joblib
 import numpy as np
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from sklearn.metrics import (accuracy_score, confusion_matrix,
+                             f1_score, precision_recall_fscore_support)
 
 APP_DIR = Path(__file__).resolve().parent
 MODEL_PATH = Path(os.environ.get(
     "HAR_MODEL_PATH",
     APP_DIR / "outputs" / "mlp_har.joblib",
 ))
+LR_MODEL_PATH = Path(os.environ.get(
+    "HAR_LR_MODEL_PATH",
+    APP_DIR / "outputs" / "lr_har.joblib",
+))
 INDEX_PATH = APP_DIR / "index.html"
+SAMPLE_PATH = APP_DIR / "samples" / "har_test_sample.csv"
 FEATURE_COUNT = 561
 MAX_UPLOAD_BYTES = 4 * 1024 * 1024
 MAX_ROWS = 10_000
 MAX_COLUMNS = 1_000
 PREVIEW_ROWS = 20
 PREVIEW_COLUMNS = 20
+LABEL_COLUMN_NAMES = {
+    "activity", "activity_label", "activity_id", "label", "target",
+    "class", "y", "ground_truth", "true_label",
+}
 
 app = FastAPI(title="UCI HAR Activity Predictor")
 
@@ -51,7 +62,9 @@ def _column_statistics(name, values):
     numeric_values = [value for value in parsed if value is not None]
     non_missing_count = len(values) - missing_count
     non_numeric_count = non_missing_count - len(numeric_values)
-    if non_numeric_count == 0:
+    if non_missing_count == 0:
+        column_type = "empty"
+    elif non_numeric_count == 0:
         column_type = "numeric"
     elif not numeric_values:
         column_type = "text"
@@ -196,6 +209,7 @@ def parse_csv_data(contents):
         "rows": normalized_rows,
         "headers": headers,
         "columns": column_count,
+        "has_header": has_header,
         "all_numeric": all_numeric,
         "statistics": statistics,
         "summary": {
@@ -213,15 +227,143 @@ def parse_csv_data(contents):
     }
 
 
-@lru_cache(maxsize=1)
-def get_model_bundle():
-    if not MODEL_PATH.is_file():
+def _normalized_name(value):
+    return value.strip().casefold().replace("-", "_").replace(" ", "_")
+
+
+def _labeled_har_data(dataset, class_names):
+    if not dataset["has_header"]:
+        return None
+
+    label_indexes = [
+        index for index, name in enumerate(dataset["headers"])
+        if _normalized_name(name) in LABEL_COLUMN_NAMES
+    ]
+    if len(label_indexes) != 1:
+        return None
+
+    label_index = label_indexes[0]
+    feature_indexes = [
+        index for index in range(dataset["columns"])
+        if index != label_index
+    ]
+    if len(feature_indexes) != FEATURE_COUNT:
+        return None
+
+    label_to_index = {
+        _normalized_name(name): index
+        for index, name in enumerate(class_names)
+    }
+    labels = []
+    features = []
+    for row in dataset["rows"]:
+        label_value = row[label_index].strip()
+        normalized_label = _normalized_name(label_value)
+        if normalized_label in label_to_index:
+            label = label_to_index[normalized_label]
+        else:
+            try:
+                numeric_label = float(label_value)
+            except ValueError:
+                return None
+            if not numeric_label.is_integer():
+                return None
+            activity_id = int(numeric_label)
+            if not 1 <= activity_id <= len(class_names):
+                return None
+            label = activity_id - 1
+
+        values = [_number_or_none(row[index]) for index in feature_indexes]
+        if any(value is None for value in values):
+            return None
+        labels.append(label)
+        features.append(values)
+
+    return np.asarray(features, dtype=np.float64), np.asarray(labels, dtype=int)
+
+
+def _classification_metrics(y_true, y_pred, class_names):
+    precision, recall, f1, support = precision_recall_fscore_support(
+        y_true,
+        y_pred,
+        labels=np.arange(len(class_names)),
+        zero_division=0,
+    )
+    return {
+        "accuracy": round(float(accuracy_score(y_true, y_pred)), 6),
+        "macro_precision": round(float(np.mean(precision)), 6),
+        "macro_recall": round(float(np.mean(recall)), 6),
+        "macro_f1": round(float(f1_score(
+            y_true, y_pred, labels=np.arange(len(class_names)),
+            average="macro", zero_division=0,
+        )), 6),
+        "per_class": [
+            {
+                "label": class_names[index],
+                "precision": round(float(precision[index]), 6),
+                "recall": round(float(recall[index]), 6),
+                "f1": round(float(f1[index]), 6),
+                "support": int(support[index]),
+            }
+            for index in range(len(class_names))
+        ],
+        "confusion_matrix": confusion_matrix(
+            y_true, y_pred, labels=np.arange(len(class_names))
+        ).tolist(),
+    }
+
+
+def _feature_histograms(dataset, excluded_indexes):
+    candidates = [
+        (index, stat["std"])
+        for index, stat in enumerate(dataset["statistics"])
+        if index not in excluded_indexes and stat["type"] == "numeric" and "std" in stat
+    ]
+    candidates.sort(key=lambda item: item[1], reverse=True)
+
+    histograms = []
+    for index, _ in candidates[:3]:
+        values = [
+            float(row[index])
+            for row in dataset["rows"]
+            if _number_or_none(row[index]) is not None
+        ]
+        if not values:
+            continue
+        counts, edges = np.histogram(values, bins=min(8, max(1, len(set(values)))))
+        histograms.append({
+            "name": dataset["headers"][index],
+            "bins": [
+                {
+                    "range": f"{edges[bin_index]:.3g}–{edges[bin_index + 1]:.3g}",
+                    "count": int(counts[bin_index]),
+                }
+                for bin_index in range(len(counts))
+            ],
+        })
+    return histograms
+
+
+def _class_counts(values, class_names):
+    counts = np.bincount(values, minlength=len(class_names))
+    return [
+        {"label": class_names[index], "count": int(counts[index])}
+        for index in range(len(class_names))
+    ]
+
+
+@lru_cache(maxsize=2)
+def get_model_bundle(name="mlp"):
+    model_path = {"mlp": MODEL_PATH, "lr": LR_MODEL_PATH}.get(name)
+    if model_path is None:
+        raise ValueError(f"Unknown HAR model: {name}")
+    if not model_path.is_file():
         raise HTTPException(
             status_code=503,
-            detail=f"Không tìm thấy mô hình đã huấn luyện: {MODEL_PATH}",
+            detail=f"Không tìm thấy mô hình {name.upper()}: {model_path}",
         )
 
-    bundle = joblib.load(MODEL_PATH)
+    bundle = joblib.load(model_path)
     if not isinstance(bundle, dict) or "model" not in bundle or "class_names" not in bundle:
         raise RuntimeError("Tệp mô hình không đúng định dạng HAR.")
     if not hasattr(bundle["model"], "predict_proba"):
@@ -237,7 +379,23 @@ def home():
 @app.get("/api/health")
 def health():
     bundle = get_model_bundle()
-    return {"status": "ok", "model": "MLP", "classes": bundle["class_names"]}
+    return {
+        "status": "ok",
+        "model": "MLP",
+        "models": ["MLP", "Logistic Regression"],
+        "classes": bundle["class_names"],
+    }
+
+
+@app.get("/api/sample", include_in_schema=False)
+def sample_csv():
+    if not SAMPLE_PATH.is_file():
+        raise HTTPException(status_code=404, detail="File CSV mẫu chưa được cài đặt.")
+    return FileResponse(
+        SAMPLE_PATH,
+        media_type="text/csv",
+        filename="har_test_sample.csv",
+    )
 
 
 @app.post("/api/predict")
@@ -275,40 +433,109 @@ async def predict(file: UploadFile = File(...)):
         "results": [],
     }
 
-    if dataset["columns"] != FEATURE_COUNT or not dataset["all_numeric"]:
+    label_index = next((
+        index for index, name in enumerate(dataset["headers"])
+        if dataset["has_header"] and _normalized_name(name) in LABEL_COLUMN_NAMES
+    ), None)
+    excluded_indexes = {label_index} if label_index is not None else set()
+    response["histograms"] = _feature_histograms(dataset, excluded_indexes)
+    is_unlabeled_har = dataset["columns"] == FEATURE_COUNT and dataset["all_numeric"]
+    is_labeled_har_shape = (
+        dataset["columns"] == FEATURE_COUNT + 1 and label_index is not None
+    )
+
+    if not is_unlabeled_har and not is_labeled_har_shape:
         response["message"] = (
             f"Đã phân tích CSV gồm {dataset['columns']} cột. "
-            "Mô hình HAR chỉ dự đoán khi dữ liệu có đúng 561 đặc trưng số."
+            "Để đánh giá mô hình, thêm cột activity/label cùng đúng 561 đặc trưng số."
         )
         return response
 
-    features = np.asarray(dataset["rows"], dtype=np.float64)
-    bundle = get_model_bundle()
-    model = bundle["model"]
-    class_names = bundle["class_names"]
-    predictions = model.predict(features)
-    probabilities = model.predict_proba(features)
-    model_classes = model.classes_
+    mlp_bundle = get_model_bundle()
+    class_names = mlp_bundle["class_names"]
+    labeled_data = _labeled_har_data(dataset, class_names)
+    if is_labeled_har_shape and labeled_data is None:
+        response["message"] = (
+            "Đã phân tích dữ liệu nhưng chưa đánh giá được: cột activity/label "
+            "phải chứa tên một trong sáu hoạt động HAR hoặc mã từ 1 đến 6; "
+            "561 đặc trưng còn lại phải là số và không được thiếu."
+        )
+        return response
 
-    results = []
-    for index, prediction in enumerate(predictions):
-        predicted_class = int(prediction)
-        if predicted_class < 0 or predicted_class >= len(class_names):
-            raise RuntimeError("Mô hình trả về mã lớp không hợp lệ.")
+    if labeled_data is None:
+        features = np.asarray(dataset["rows"], dtype=np.float64)
+        y_true = None
+    else:
+        features, y_true = labeled_data
 
-        probability_by_class = {
-            class_names[int(model_class)]: round(float(probabilities[index, column]), 6)
-            for column, model_class in enumerate(model_classes)
+    model_outputs = {}
+    predictions_by_model = {}
+    for model_name, display_name in (("mlp", "MLP"), ("lr", "Logistic Regression")):
+        bundle = mlp_bundle if model_name == "mlp" else get_model_bundle(model_name)
+        if bundle["class_names"] != class_names:
+            raise RuntimeError("Các mô hình HAR không dùng chung thứ tự nhãn.")
+
+        model = bundle["model"]
+        predictions = model.predict(features).astype(int)
+        probabilities = model.predict_proba(features)
+        predictions_by_model[model_name] = predictions
+        model_outputs[model_name] = {
+            "name": display_name,
+            "predicted_counts": _class_counts(predictions, class_names),
+            "metrics": (
+                _classification_metrics(y_true, predictions, class_names)
+                if y_true is not None else None
+            ),
+            "predictions": predictions,
+            "confidence": probabilities.max(axis=1),
+            "probabilities": probabilities,
         }
-        results.append({
-            "row": index + 1,
-            "prediction": class_names[predicted_class],
-            "confidence": round(float(probabilities[index].max()), 6),
-            "probabilities": probability_by_class,
-        })
 
-    response["mode"] = "prediction"
+    agreement = float(np.mean(
+        predictions_by_model["mlp"] == predictions_by_model["lr"]
+    ))
+    response["mode"] = "evaluation" if y_true is not None else "prediction"
     response["model"] = "MLP"
-    response["message"] = "CSV có 561 đặc trưng số; đã chạy dự đoán HAR."
-    response["results"] = results
+    response["models"] = ["MLP", "Logistic Regression"]
+    response["message"] = (
+        "Đã so sánh hai mô hình với nhãn thật trong CSV."
+        if y_true is not None
+        else "Đã so sánh dự đoán của MLP và Logistic Regression."
+    )
+    response["class_names"] = class_names
+    response["class_distribution"] = (
+        _class_counts(y_true, class_names)
+        if y_true is not None else None
+    )
+    response["model_agreement"] = round(agreement, 6)
+    response["model_metrics"] = {
+        name: output["metrics"] for name, output in model_outputs.items()
+    }
+    response["predicted_distributions"] = {
+        name: output["predicted_counts"] for name, output in model_outputs.items()
+    }
+    response["predictions"] = [
+        {
+            "row": index + 1,
+            "actual": class_names[int(y_true[index])] if y_true is not None else None,
+            "mlp": class_names[int(predictions_by_model["mlp"][index])],
+            "mlp_confidence": round(float(model_outputs["mlp"]["confidence"][index]), 6),
+            "logistic_regression": class_names[int(predictions_by_model["lr"][index])],
+            "lr_confidence": round(float(model_outputs["lr"]["confidence"][index]), 6),
+        }
+        for index in range(len(features))
+    ]
+    mlp_model = model_outputs["mlp"]
+    response["results"] = [
+        {
+            "row": index + 1,
+            "prediction": class_names[int(mlp_model["predictions"][index])],
+            "confidence": round(float(mlp_model["confidence"][index]), 6),
+            "probabilities": {
+                class_names[int(class_id)]: round(float(mlp_model["probabilities"][index, column]), 6)
+                for column, class_id in enumerate(mlp_bundle["model"].classes_)
+            },
+        }
+        for index in range(len(features))
+    ]
     return response

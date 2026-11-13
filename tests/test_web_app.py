@@ -1,6 +1,7 @@
 import csv
 import io
 import unittest
+from pathlib import Path
 
 import numpy as np
 from fastapi.testclient import TestClient
@@ -35,6 +36,38 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(without_header.status_code, 200)
         self.assertEqual(with_header.json()["mode"], "prediction")
         self.assertEqual(without_header.json()["mode"], "prediction")
+        self.assertIn("mlp", with_header.json()["model_metrics"])
+        self.assertIn("lr", with_header.json()["model_metrics"])
+        self.assertEqual(len(with_header.json()["predictions"]), 1)
+
+    def test_labeled_real_sample_evaluates_and_compares_both_models(self):
+        sample_path = Path(__file__).resolve().parents[1] / "samples" / "har_test_sample.csv"
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/predict",
+                files={"file": ("har_test_sample.csv", sample_path.read_bytes(), "text/csv")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        self.assertEqual(result["mode"], "evaluation")
+        self.assertEqual(result["rows"], 180)
+        self.assertEqual(result["columns"], 562)
+        self.assertEqual(result["summary"]["numeric_columns"], 561)
+        self.assertEqual(result["class_distribution"][0]["count"], 30)
+        self.assertEqual(len(result["model_metrics"]["mlp"]["confusion_matrix"]), 6)
+        self.assertEqual(len(result["model_metrics"]["lr"]["per_class"]), 6)
+        self.assertEqual(len(result["predictions"]), 180)
+        self.assertGreaterEqual(result["model_agreement"], 0)
+        self.assertLessEqual(result["model_agreement"], 1)
+
+    def test_sample_download_is_available(self):
+        with TestClient(app) as client:
+            response = client.get("/api/sample")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("har_test_sample.csv", response.headers["content-disposition"])
 
     def test_100_column_csv_returns_preview_and_statistics_without_prediction(self):
         samples = [
