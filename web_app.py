@@ -49,22 +49,41 @@ def _column_statistics(name, values):
     )
     parsed = [_number_or_none(value) for value in values]
     numeric_values = [value for value in parsed if value is not None]
-    is_numeric = len(numeric_values) == len(values) - missing_count
+    non_missing_count = len(values) - missing_count
+    non_numeric_count = non_missing_count - len(numeric_values)
+    if non_numeric_count == 0:
+        column_type = "numeric"
+    elif not numeric_values:
+        column_type = "text"
+    else:
+        column_type = "mixed"
 
     stats = {
         "name": name,
-        "type": "numeric" if is_numeric else "text",
+        "type": column_type,
         "missing": missing_count,
+        "non_numeric": non_numeric_count,
         "unique": len({value.strip() for value in values if value.strip()}),
     }
 
-    if is_numeric and numeric_values:
+    if numeric_values:
+        q1, median, q3 = np.percentile(numeric_values, [25, 50, 75])
+        iqr = q3 - q1
+        outlier_count = sum(
+            value < q1 - 1.5 * iqr or value > q3 + 1.5 * iqr
+            for value in numeric_values
+        )
         stats.update({
             "min": round(float(min(numeric_values)), 6),
             "max": round(float(max(numeric_values)), 6),
             "mean": round(float(np.mean(numeric_values)), 6),
+            "median": round(float(median), 6),
+            "std": round(float(np.std(numeric_values)), 6),
+            "q1": round(float(q1), 6),
+            "q3": round(float(q3), 6),
+            "outliers": int(outlier_count),
         })
-    elif not is_numeric:
+    if non_numeric_count:
         counts = Counter(value.strip() for value in values if value.strip())
         stats["most_common"] = [
             {"value": value, "count": count}
@@ -116,6 +135,7 @@ def parse_csv_data(contents):
         row + [""] * (column_count - len(row))
         for row in data_rows
     ]
+    inconsistent_rows = sum(len(row) != column_count for row in data_rows)
     column_values = [
         [row[index] for row in normalized_rows]
         for index in range(column_count)
@@ -125,16 +145,71 @@ def parse_csv_data(contents):
         for row in normalized_rows
         for value in row
     )
+    statistics = [
+        _column_statistics(headers[index], values)
+        for index, values in enumerate(column_values)
+    ]
+    missing_cells = sum(stat["missing"] for stat in statistics)
+    non_numeric_cells = sum(stat["non_numeric"] for stat in statistics)
+    duplicate_rows = len(normalized_rows) - len({
+        tuple(row) for row in normalized_rows
+    })
+    constant_columns = [
+        stat["name"] for stat in statistics
+        if stat["unique"] == 1 and stat["missing"] == 0
+    ]
+    numeric_columns = sum(stat["type"] == "numeric" for stat in statistics)
+    text_columns = sum(stat["type"] == "text" for stat in statistics)
+    mixed_columns = sum(stat["type"] == "mixed" for stat in statistics)
+
+    total_cells = len(normalized_rows) * column_count
+    insights = []
+    if missing_cells:
+        insights.append(
+            f"Có {missing_cells:,} ô trống hoặc giá trị thiếu "
+            f"({missing_cells / total_cells:.1%} tổng số ô)."
+        )
+    if non_numeric_cells:
+        insights.append(
+            f"Có {non_numeric_cells:,} ô chứa dữ liệu không phải số "
+            "(có thể là dữ liệu phân loại hoặc cần làm sạch)."
+        )
+    if duplicate_rows:
+        insights.append(f"Có {duplicate_rows:,} dòng trùng hoàn toàn.")
+    if constant_columns:
+        names = ", ".join(constant_columns[:5])
+        suffix = "…" if len(constant_columns) > 5 else ""
+        insights.append(
+            f"Có {len(constant_columns)} cột chỉ có một giá trị: {names}{suffix}."
+        )
+    if inconsistent_rows:
+        insights.append(
+            f"Có {inconsistent_rows:,} dòng có số cột lệch so với bảng; "
+            "các ô thiếu đã được tính vào thống kê."
+        )
+    if not insights:
+        insights.append(
+            "Không phát hiện ô thiếu, dòng trùng hoặc cột không biến thiên."
+        )
 
     return {
         "rows": normalized_rows,
         "headers": headers,
         "columns": column_count,
         "all_numeric": all_numeric,
-        "statistics": [
-            _column_statistics(headers[index], values)
-            for index, values in enumerate(column_values)
-        ],
+        "statistics": statistics,
+        "summary": {
+            "missing_cells": missing_cells,
+            "non_numeric_cells": non_numeric_cells,
+            "duplicate_rows": duplicate_rows,
+            "constant_columns": len(constant_columns),
+            "numeric_columns": numeric_columns,
+            "text_columns": text_columns,
+            "mixed_columns": mixed_columns,
+            "inconsistent_rows": inconsistent_rows,
+            "missing_percent": round(missing_cells / total_cells * 100, 2),
+        },
+        "insights": insights,
     }
 
 
@@ -187,6 +262,8 @@ async def predict(file: UploadFile = File(...)):
         "mode": "analysis",
         "rows": len(dataset["rows"]),
         "columns": dataset["columns"],
+        "summary": dataset["summary"],
+        "insights": dataset["insights"],
         "column_names": dataset["headers"],
         "preview": [
             row[:PREVIEW_COLUMNS]

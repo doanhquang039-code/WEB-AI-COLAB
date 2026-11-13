@@ -7,8 +7,10 @@ does not depend on the `Learn-AI` GitHub repository at runtime.
 ## Input format
 
 The web accepts CSV files up to 4 MB, 10,000 rows, and 1,000 columns. A header row
-is optional. It shows a data preview and per-column statistics (numeric type, missing
-values, unique values, min/max/mean or common text values).
+is optional. It shows a data preview, dataset-level findings (missing values,
+non-numeric cells, duplicate rows, and constant columns), and per-column statistics
+(type, unique values, min/max, quartiles, median, mean, standard deviation, and
+IQR-based outlier counts or common text values).
 
 Only a CSV with exactly 561 numeric UCI HAR features in the original feature order
 is sent to the saved MLP for activity predictions. Other files are still analyzed

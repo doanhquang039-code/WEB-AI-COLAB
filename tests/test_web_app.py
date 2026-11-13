@@ -56,6 +56,9 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(len(result["preview"]), 5)
         self.assertEqual(result["statistics"][0]["min"], 0)
         self.assertEqual(result["statistics"][0]["max"], 400)
+        self.assertEqual(result["statistics"][0]["median"], 200)
+        self.assertEqual(result["summary"]["numeric_columns"], 100)
+        self.assertEqual(result["summary"]["missing_cells"], 0)
         self.assertEqual(result["results"], [])
 
     def test_analysis_reports_missing_and_text_values(self):
@@ -72,6 +75,25 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(result["mode"], "analysis")
         self.assertEqual(result["statistics"][1]["missing"], 1)
         self.assertEqual(result["statistics"][0]["type"], "text")
+        self.assertEqual(result["statistics"][1]["type"], "mixed")
+        self.assertEqual(result["summary"]["non_numeric_cells"], 4)
+
+    def test_analysis_detects_duplicate_rows_and_numeric_outliers(self):
+        contents = b"value,label\n1,a\n2,b\n3,c\n100,d\n1,a\n"
+
+        with TestClient(app) as client:
+            response = client.post(
+                "/api/predict",
+                files={"file": ("sample.csv", contents, "text/csv")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        value_stats = result["statistics"][0]
+        self.assertEqual(result["summary"]["duplicate_rows"], 1)
+        self.assertEqual(value_stats["median"], 2)
+        self.assertEqual(value_stats["outliers"], 1)
+        self.assertTrue(any("dòng trùng" in insight for insight in result["insights"]))
 
     def test_empty_and_header_only_csv_are_rejected(self):
         with TestClient(app) as client:

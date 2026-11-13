@@ -133,6 +133,18 @@
 
     .analysis-block { margin-top: 22px; }
     .analysis-block h3 { margin: 0 0 10px; font-size: 16px; }
+    .insights {
+      display: grid;
+      gap: 8px;
+      margin: 0;
+      padding: 14px 18px 14px 34px;
+      border: 1px solid #e6eaf2;
+      border-radius: 12px;
+      background: #fbfcff;
+      color: #46516a;
+      font-size: 14px;
+      line-height: 1.5;
+    }
 
     .results-head {
       display: flex;
@@ -234,7 +246,12 @@
         <div id="summary" class="summary"></div>
         <p id="analysis-message" class="notice"></p>
         <div class="analysis-block">
+          <h3>Nhận xét nhanh</h3>
+          <ul id="insights" class="insights"></ul>
+        </div>
+        <div class="analysis-block">
           <h3>Thống kê theo cột</h3>
+          <p class="note">Ngoại lệ được ước tính theo quy tắc IQR (ngoài Q1 − 1,5×IQR đến Q3 + 1,5×IQR); đây là dấu hiệu cần xem lại, không khẳng định dữ liệu sai.</p>
           <div class="table-wrap">
             <table>
               <thead id="statistics-head"></thead>
@@ -283,6 +300,7 @@
     const summaryElement = document.querySelector("#summary");
     const tableCaption = document.querySelector("#table-caption");
     const analysisMessage = document.querySelector("#analysis-message");
+    const insightsElement = document.querySelector("#insights");
     const statisticsHead = document.querySelector("#statistics-head");
     const statisticsBody = document.querySelector("#statistics-body");
     const tableHead = document.querySelector("#table-head");
@@ -305,6 +323,10 @@
       [
         `Số dòng: ${data.rows.toLocaleString("vi-VN")}`,
         `Số cột: ${data.columns.toLocaleString("vi-VN")}`,
+        `Cột số: ${data.summary.numeric_columns}`,
+        `Ô thiếu: ${data.summary.missing_cells.toLocaleString("vi-VN")} (${data.summary.missing_percent}%)`,
+        `Ô chữ/không phải số: ${data.summary.non_numeric_cells.toLocaleString("vi-VN")}`,
+        `Dòng trùng: ${data.summary.duplicate_rows}`,
         data.mode === "prediction" ? `Mô hình: ${data.model}` : "Chế độ: phân tích CSV",
       ].forEach((text) => {
         const pill = document.createElement("span");
@@ -314,11 +336,17 @@
       });
 
       analysisMessage.textContent = data.message;
+      insightsElement.replaceChildren();
+      data.insights.forEach((insight) => {
+        const item = document.createElement("li");
+        item.textContent = insight;
+        insightsElement.appendChild(item);
+      });
       downloadButton.hidden = data.mode !== "prediction";
 
       const statHeadings = [
-        "Cột", "Kiểu", "Thiếu", "Giá trị khác nhau", "Nhỏ nhất",
-        "Lớn nhất", "Trung bình", "Giá trị phổ biến",
+        "Cột", "Kiểu", "Thiếu", "Khác nhau", "Nhỏ nhất", "Q1", "Trung vị",
+        "Trung bình", "Q3", "Lớn nhất", "Độ lệch chuẩn", "Ngoại lệ", "Giá trị phổ biến",
       ];
       statisticsHead.replaceChildren();
       const statisticsHeadingRow = document.createElement("tr");
@@ -332,12 +360,17 @@
           .join(", ");
         [
           stat.name,
-          stat.type === "numeric" ? "Số" : "Văn bản",
+          stat.type === "numeric" ? "Số" : stat.type === "mixed" ? "Hỗn hợp" : "Văn bản",
           String(stat.missing),
           String(stat.unique),
           stat.min === undefined ? "—" : String(stat.min),
-          stat.max === undefined ? "—" : String(stat.max),
+          stat.q1 === undefined ? "—" : String(stat.q1),
+          stat.median === undefined ? "—" : String(stat.median),
           stat.mean === undefined ? "—" : String(stat.mean),
+          stat.q3 === undefined ? "—" : String(stat.q3),
+          stat.max === undefined ? "—" : String(stat.max),
+          stat.std === undefined ? "—" : String(stat.std),
+          stat.outliers === undefined ? "—" : String(stat.outliers),
           commonValues || "—",
         ].forEach((value) => addCell(row, value));
         statisticsBody.appendChild(row);
